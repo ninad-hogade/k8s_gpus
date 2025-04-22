@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm-mps
+spec:
+  serviceName: "vllm-mps"
+  replicas: 10  # Changed from 5 to 10 to utilize MPS GPU sharing
+  selector:
+    matchLabels:
+      app: vllm-mps
+  template:
+    metadata:
+      labels:
+        app: vllm-mps
+      annotations:
+        # Enable NVIDIA MPS
+        nvidia.com/mps-enabled: "true"
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 10  # Added to speed up pod termination if needed
+      containers:
+      - name: vllm
+        image: ninadhogade/vllm-mps:latest
+        ports:
+        - containerPort: 8000
+          name: http
+        # No need for command and args anymore as they're in the image
+        resources:
+          limits:
+            # Must use integer value for nvidia.com/gpu
+            nvidia.com/gpu: 1
+          requests:
+            memory: "8Gi"  # Reduced memory request
+            cpu: "4"       # Reduced CPU request
+        volumeMounts:
+        - name: mps-pipe-dir
+          mountPath: /tmp/nvidia-mps
+        - name: mps-log-dir
+          mountPath: /tmp/nvidia-log
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+        - name: NVIDIA_MPS_ACTIVE
+          value: "1"
+        # MPS-specific environment variables
+        - name: CUDA_MPS_PIPE_DIRECTORY
+          value: "/tmp/nvidia-mps"
+        - name: CUDA_MPS_LOG_DIRECTORY
+          value: "/tmp/nvidia-log"
+        - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
+          value: "40"  # Changed from 10 to 50 for sharing between 2 pods per GPU
+      # Encourage pods to be scheduled on nodes that already have vLLM pods (for MPS sharing)
+      # But limit to 2 pods per node using podAntiAffinity
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - vllm-mps
+              topologyKey: "kubernetes.io/hostname"
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 80
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - vllm-mps
+              topologyKey: "kubernetes.io/hostname"
+              # This will discourage but not prevent more than 2 pods on the same node
+      volumes:
+      - name: mps-pipe-dir
+        hostPath:
+          path: /tmp/nvidia-mps
+          type: Directory
+      - name: mps-log-dir
+        hostPath:
+          path: /tmp/nvidia-log
+          type: Directory
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+---
+# Service for MPS GPU pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-mps
+spec:
+  selector:
+    app: vllm-mps
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+  type: ClusterIP
+---
+# Load balancer service for MPS GPU instances
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-mps-lb
+spec:
+  selector:
+    app: vllm-mps
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+  type: LoadBalancer
