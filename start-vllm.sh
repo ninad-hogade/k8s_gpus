@@ -21,7 +21,7 @@ echo "Starting vLLM server with TinyLlama model in MPS mode..."
 python -m vllm.entrypoints.openai.api_server \
   --host 0.0.0.0 \
   --port $PORT \
-  --model /app/models/TinyLlama-1.1B-Chat-v1.0 \
-  --gpu-memory-utilization 0.4 \
-  --max-model-len 512 \
-  --tensor-parallel-size 1
+  --model /app/models/TinyLlama-1.1B-Chat-v1.0 #\
+  # --gpu-memory-utilization 0.2 \
+  # --max-model-len 512 \
+  # --tensor-parallel-size 1

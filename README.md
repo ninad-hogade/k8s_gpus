@@ -326,3 +326,9 @@ sudo snap remove microk8s
 sudo rm -rf ~/.kube
 sudo rm -rf /var/snap/microk8s
 ```
+
+If you have multiple stuck pods, you can delete all terminating pods at once:
+
+```bash
+microk8s kubectl get pods | grep Terminating | awk '{print $1}' | xargs microk8s kubectl delete pod --grace-period=0 --force
+```

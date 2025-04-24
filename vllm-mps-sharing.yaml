@@ -17,7 +17,7 @@ spec:
         nvidia.com/mps-enabled: "true"
     spec:
       runtimeClassName: nvidia
-      terminationGracePeriodSeconds: 10  # Added to speed up pod termination if needed
+      terminationGracePeriodSeconds: 5  # Added to speed up pod termination if needed
       containers:
       - name: vllm
         image: ninadhogade/vllm-mps:latest
@@ -30,8 +30,8 @@ spec:
             # Must use integer value for nvidia.com/gpu
             nvidia.com/gpu: 1
           requests:
-            memory: "8Gi"  # Reduced memory request
-            cpu: "4"       # Reduced CPU request
+            memory: "32Gi"  # Reduced memory request
+            cpu: "20"       # Reduced CPU request
         volumeMounts:
         - name: mps-pipe-dir
           mountPath: /tmp/nvidia-mps
@@ -50,7 +50,7 @@ spec:
         - name: CUDA_MPS_LOG_DIRECTORY
           value: "/tmp/nvidia-log"
         - name: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE
-          value: "40"  # Changed from 10 to 50 for sharing between 2 pods per GPU
+          value: "35"  # Changed from 10 to 50 for sharing between 2 pods per GPU
       # Encourage pods to be scheduled on nodes that already have vLLM pods (for MPS sharing)
       # But limit to 2 pods per node using podAntiAffinity
       affinity:
