@@ -249,3 +249,209 @@ Scale DOWN when:
 ```
 
 This flow ensures optimal GPU utilization while maintaining performance requirements and cost efficiency across your heterogeneous H100/A100 cluster.
+
+
+**Short Answer: No, not safely.** Updating MPS ConfigMaps while pods are running will typically require pod restarts and can cause service disruption.
+
+## What Happens When You Update MPS ConfigMap
+
+### 1. **NVIDIA Device Plugin Restart Required**
+```bash
+# When you update the MPS ConfigMap:
+kubectl patch configmap mps-config -p '{"data":{"config.yaml":"new-config"}}'
+
+# The NVIDIA device plugin daemonset must restart to pick up changes:
+kubectl rollout restart daemonset/nvdp-nvidia-device-plugin -n nvidia-device-plugin
+```
+
+### 2. **MPS Server Restart Impact**
+- The MPS server on each node must be stopped and restarted
+- All existing MPS contexts are terminated
+- Running pods lose GPU access immediately
+- Pods may crash or enter error states
+
+### 3. **Pod Disruption**
+```bash
+# Before MPS config change - pods running normally
+kubectl get pods
+NAME           READY   STATUS    RESTARTS   AGE
+vllm-mps-0     1/1     Running   0          10m
+vllm-mps-1     1/1     Running   0          10m
+
+# After MPS config change - pods may fail
+kubectl get pods
+NAME           READY   STATUS    RESTARTS   AGE
+vllm-mps-0     0/1     Error     1          11m
+vllm-mps-1     0/1     Error     1          11m
+```
+
+## Safe Strategies for Dynamic MPS Updates
+
+### 1. **Rolling Node Updates**
+```bash
+#!/bin/bash
+# rolling-mps-update.sh
+
+NODES=$(kubectl get nodes -l nvidia.com/gpu.present=true -o name)
+
+for NODE in $NODES; do
+    NODE_NAME=$(echo $NODE | cut -d'/' -f2)
+    echo "Updating MPS config on $NODE_NAME"
+    
+    # 1. Cordon the node
+    kubectl cordon $NODE_NAME
+    
+    # 2. Drain pods gracefully
+    kubectl drain $NODE_NAME --ignore-daemonsets --delete-emptydir-data --force
+    
+    # 3. Update MPS config for this node
+    kubectl patch configmap mps-config-$NODE_NAME -p '{"data":{"config.yaml":"'$(cat new-mps-config.yaml | base64 -w 0)'"}}'
+    
+    # 4. Restart device plugin on this node only
+    kubectl delete pod -n nvidia-device-plugin -l app=nvidia-device-plugin --field-selector spec.nodeName=$NODE_NAME
+    
+    # 5. Wait for device plugin to restart
+    sleep 30
+    
+    # 6. Uncordon the node
+    kubectl uncordon $NODE_NAME
+    
+    # 7. Wait for pods to reschedule
+    sleep 60
+    
+    echo "Node $NODE_NAME updated successfully"
+done
+```
+
+### 2. **Node Pool Strategy**
+```yaml
+# Use different node pools with different MPS configurations
+apiVersion: v1
+kind: Node
+metadata:
+  name: gpu-node-pool-1
+  labels:
+    node-pool: "high-throughput"
+    mps-config: "multi-partition"
+---
+apiVersion: v1
+kind: Node  
+metadata:
+  name: gpu-node-pool-2
+  labels:
+    node-pool: "single-model"
+    mps-config: "single-partition"
+```
+
+### 3. **Graceful Pod Migration**
+```python
+# graceful_mps_update.py
+import kubernetes
+from kubernetes import client, config
+
+class GracefulMPSUpdater:
+    def __init__(self):
+        config.load_incluster_config()
+        self.v1 = client.CoreV1Api()
+        self.apps_v1 = client.AppsV1Api()
+    
+    def update_mps_with_migration(self, new_config, target_nodes):
+        """Update MPS config with pod migration"""
+        
+        for node_name in target_nodes:
+            # 1. Get pods running on this node
+            pods = self._get_gpu_pods_on_node(node_name)
+            
+            # 2. Scale up replicas on other nodes first
+            self._scale_up_on_other_nodes(pods)
+            
+            # 3. Wait for new pods to be ready
+            self._wait_for_pods_ready()
+            
+            # 4. Gracefully terminate pods on target node
+            self._terminate_pods_on_node(node_name)
+            
+            # 5. Update MPS configuration
+            self._update_mps_config(node_name, new_config)
+            
+            # 6. Restart device plugin on this node
+            self._restart_device_plugin(node_name)
+            
+            # 7. Allow pods to reschedule
+            self._enable_scheduling(node_name)
+```
+
+## Best Practices for Production
+
+### 1. **Maintenance Windows**
+```yaml
+# Schedule MPS updates during low-traffic periods
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mps-config-updater
+spec:
+  schedule: "0 2 * * 0"  # Sunday 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: mps-updater
+            image: kubectl:latest
+            command: ["/scripts/rolling-mps-update.sh"]
+```
+
+### 2. **Pre-warming Strategy**
+```bash
+# Pre-create pods with new configuration on available nodes
+kubectl scale statefulset vllm-mps --replicas=15  # Scale up before update
+# Then update MPS config on nodes with fewer pods
+# Finally scale back down
+kubectl scale statefulset vllm-mps --replicas=10
+```
+
+### 3. **Health Checks and Rollback**
+```yaml
+# Add readiness probes to detect MPS configuration issues
+containers:
+- name: vllm
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    failureThreshold: 3
+  
+  # Environment variable to detect MPS changes
+  env:
+  - name: MPS_CONFIG_VERSION
+    valueFrom:
+      configMapKeyRef:
+        name: mps-config
+        key: version
+```
+
+### 4. **Monitoring During Updates**
+```bash
+# Monitor pod health during MPS updates
+kubectl get pods -w --field-selector status.phase!=Running
+
+# Check GPU utilization
+nvidia-smi dmon -s u -c 10
+
+# Monitor inference latency
+curl -s http://vllm-service:8000/metrics | grep inference_latency
+```
+
+## Recommended Approach
+
+For your production system, implement a **staged update approach**:
+
+1. **Blue-Green Node Strategy**: Maintain two sets of nodes with different MPS configurations
+2. **Gradual Migration**: Move workloads gradually between node sets
+3. **Automated Rollback**: If issues detected, automatically revert to previous configuration
+4. **Comprehensive Monitoring**: Track pod health, GPU utilization, and inference performance throughout the update
+
+This ensures zero-downtime updates while maintaining optimal GPU utilization across your heterogeneous cluster.
