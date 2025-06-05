@@ -1,6 +1,4 @@
-Looking at this project, it's technically sound and definitely implementable. The core concept of dynamically managing GPU resources through MPS configuration based on workload characteristics is excellent. However, I'll suggest some modifications to make it more robust and practical for production.
-
-## Modified Comprehensive Process Flow
+## MPS-aware kubernetes/vLLM scheduler
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
